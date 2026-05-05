@@ -7,6 +7,7 @@ from sklearn.datasets import load_breast_cancer, load_iris, load_wine
 from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.model_selection import train_test_split
 from sklearn.naive_bayes import BernoulliNB, GaussianNB, MultinomialNB
+from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 
 st.markdown(
@@ -74,7 +75,7 @@ def load_uploaded_dataset(uploaded_file):
             raise ValueError(f"Error loading dataset: {e}") from e
 
 
-def prepare_features(df, target_name=None):
+def resolve_target_name(df, target_name=None):
     if df.shape[1] < 2:
         raise ValueError("The dataset must include at least one feature column and one target column.")
 
@@ -84,12 +85,49 @@ def prepare_features(df, target_name=None):
     if target_name not in df.columns:
         raise ValueError("Please select a valid target variable.")
 
+    return target_name
+
+
+def preprocess_data(df, target_name=None, high_cardinality_threshold=15):
+    target_name = resolve_target_name(df, target_name)
     X = df.drop(columns=[target_name])
     y = df[target_name]
+    original_feature_count = X.shape[1]
 
-    X = pd.get_dummies(X, drop_first=False)
+    categorical_cols = X.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
+    high_cardinality_cols = [
+        column
+        for column in categorical_cols
+        if X[column].nunique(dropna=True) > high_cardinality_threshold
+    ]
+    X = X.drop(columns=high_cardinality_cols)
+
+    model_data = pd.concat([X, y.rename(target_name)], axis=1).dropna()
+    rows_dropped_missing = df.shape[0] - model_data.shape[0]
+    X = model_data.drop(columns=[target_name]).copy()
+    y = model_data[target_name]
+    binary_feature_cols = [
+        column
+        for column in X.columns
+        if X[column].dropna().isin([0, 1, True, False]).all()
+    ]
+    binary_feature_ratio = len(binary_feature_cols) / max(X.shape[1], 1)
+
+    numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    categorical_cols = X.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
+
+    label_encoders = {}
+    for column in categorical_cols:
+        encoder = LabelEncoder()
+        X[column] = encoder.fit_transform(X[column].astype(str))
+        label_encoders[column] = encoder
+
+    scaler = None
+    if numeric_cols:
+        scaler = StandardScaler()
+        X[numeric_cols] = scaler.fit_transform(X[numeric_cols])
+
     X = X.apply(pd.to_numeric, errors="coerce")
-
     model_data = pd.concat([X, y.rename(target_name)], axis=1).dropna()
     X = model_data.drop(columns=[target_name])
     y = model_data[target_name]
@@ -100,7 +138,28 @@ def prepare_features(df, target_name=None):
     if y.nunique() < 2:
         raise ValueError("The target column must contain at least two classes.")
 
-    return X, y, target_name
+    preprocessing_info = {
+        "original_feature_count": original_feature_count,
+        "final_feature_count": X.shape[1],
+        "high_cardinality_threshold": high_cardinality_threshold,
+        "dropped_high_cardinality_cols": high_cardinality_cols,
+        "retained_feature_columns": X.columns.tolist(),
+        "numeric_cols": numeric_cols,
+        "categorical_cols": categorical_cols,
+        "binary_feature_cols": binary_feature_cols,
+        "binary_feature_ratio": binary_feature_ratio,
+        "label_encoders": label_encoders,
+        "scaler": scaler,
+        "rows_dropped_missing": rows_dropped_missing,
+        "rows_used": len(X),
+    }
+
+    return X, y, target_name, preprocessing_info
+
+
+def prepare_features(df, target_name=None):
+    X, y, resolved_target_name, _ = preprocess_data(df, target_name)
+    return X, y, resolved_target_name
 
 
 MODEL_CLASSES = {
@@ -110,7 +169,13 @@ MODEL_CLASSES = {
 }
 
 
-def recommend_nb_classifier(X):
+def recommend_nb_classifier(X, preprocessing_info=None):
+    if preprocessing_info and preprocessing_info["binary_feature_ratio"] >= 0.95:
+        return (
+            "BernoulliNB",
+            "Reasoning: The retained raw features are almost entirely binary, which fits BernoulliNB well.",
+        )
+
     values = X.to_numpy(dtype=float)
     binary_proportion = np.isin(values, [0, 1]).mean()
     has_negative_values = bool((values < 0).any())
@@ -138,13 +203,20 @@ def recommend_nb_classifier(X):
     )
 
 
-def build_nb_model(model_name, var_smoothing):
+def build_nb_model(model_name, model_params):
     if model_name == "GaussianNB":
-        return GaussianNB(var_smoothing=var_smoothing)
+        return GaussianNB(var_smoothing=model_params["var_smoothing"])
     if model_name == "MultinomialNB":
-        return MultinomialNB()
+        return MultinomialNB(
+            alpha=model_params["alpha"],
+            fit_prior=model_params["fit_prior"],
+        )
     if model_name == "BernoulliNB":
-        return BernoulliNB()
+        return BernoulliNB(
+            alpha=model_params["alpha"],
+            fit_prior=model_params["fit_prior"],
+            binarize=model_params["binarize"],
+        )
     raise ValueError(f"Unsupported model type: {model_name}")
 
 
@@ -153,9 +225,65 @@ def validate_model_choice(X, model_name):
         raise ValueError("MultinomialNB requires non-negative feature values.")
 
 
-def train_and_evaluate(X, y, model_name, var_smoothing):
+def build_model_parameter_controls(model_name):
+    sidebar_section("Model Parameters")
+    model_params = {}
+
+    if model_name == "GaussianNB":
+        smoothing_power = st.sidebar.slider(
+            "Variance Smoothing (log10)",
+            min_value=-11,
+            max_value=-1,
+            value=-9,
+            step=1,
+            help="GaussianNB var_smoothing value is 10 raised to this exponent.",
+        )
+        model_params["var_smoothing"] = 10.0 ** smoothing_power
+        st.sidebar.caption(f"var_smoothing = {model_params['var_smoothing']:.0e}")
+    elif model_name == "MultinomialNB":
+        model_params["alpha"] = st.sidebar.slider(
+            "Alpha (Additive Smoothing)",
+            min_value=0.0,
+            max_value=2.0,
+            value=1.0,
+            step=0.1,
+        )
+        model_params["fit_prior"] = st.sidebar.checkbox(
+            "Fit Prior",
+            value=True,
+            help="Whether to learn class prior probabilities.",
+        )
+    elif model_name == "BernoulliNB":
+        model_params["alpha"] = st.sidebar.slider(
+            "Alpha (Additive Smoothing)",
+            min_value=0.0,
+            max_value=2.0,
+            value=1.0,
+            step=0.1,
+        )
+        model_params["fit_prior"] = st.sidebar.checkbox(
+            "Fit Prior",
+            value=True,
+            help="Whether to learn class prior probabilities.",
+        )
+        model_params["binarize"] = st.sidebar.number_input(
+            "Binarize",
+            min_value=0.0,
+            max_value=2.0,
+            value=0.0,
+            step=0.1,
+            help="Threshold for binarizing sample features.",
+        )
+    else:
+        raise ValueError(f"Unsupported model type: {model_name}")
+
+    sidebar_divider()
+    return model_params
+
+
+def train_and_evaluate(X, y, model_name, model_params):
     validate_model_choice(X, model_name)
-    model = build_nb_model(model_name, var_smoothing)
+    model = build_nb_model(model_name, model_params)
     class_count = y.nunique()
     test_count = int(np.ceil(len(y) * 0.25))
     can_split = (
@@ -245,12 +373,13 @@ def build_confusion_matrix_plot(y_test, y_pred):
     )
 
 
-def create_preprocessing_diagram(df, target_name, processed_feature_count):
+def create_preprocessing_diagram(df, target_name, preprocessing_info):
     feature_df = df.drop(columns=[target_name])
     missing_values = int(df.isna().sum().sum())
-    categorical_columns = feature_df.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
-    numeric_columns = feature_df.select_dtypes(include=[np.number]).columns.tolist()
-    dropped_rows = int(df.shape[0] - df.dropna().shape[0])
+    categorical_columns = preprocessing_info["categorical_cols"]
+    numeric_columns = preprocessing_info["numeric_cols"]
+    dropped_rows = preprocessing_info["rows_dropped_missing"]
+    high_cardinality_cols = preprocessing_info["dropped_high_cardinality_cols"]
 
     steps = [
         {
@@ -273,19 +402,28 @@ def create_preprocessing_diagram(df, target_name, processed_feature_count):
             ),
         },
         {
+            "label": "High-Cardinality Filter",
+            "status": "active" if high_cardinality_cols else "skip",
+            "detail": (
+                "Dropped: " + ", ".join(high_cardinality_cols)
+                if high_cardinality_cols
+                else "No high-cardinality categorical columns exceeded the threshold."
+            ),
+        },
+        {
             "label": "Categorical Encoding",
             "status": "active" if categorical_columns else "skip",
             "detail": (
-                f"One-hot encoded: {', '.join(categorical_columns)}."
+                f"Label encoded: {', '.join(categorical_columns)}."
                 if categorical_columns
                 else "No categorical feature columns detected."
             ),
         },
         {
-            "label": "Numerical Conversion",
+            "label": "Numerical Scaling",
             "status": "active" if numeric_columns else "skip",
             "detail": (
-                f"Numeric columns retained/coerced: {', '.join(numeric_columns[:6])}"
+                f"Scaled numeric columns: {', '.join(numeric_columns[:6])}"
                 + ("..." if len(numeric_columns) > 6 else ".")
                 if numeric_columns
                 else "No numeric feature columns detected before encoding."
@@ -294,7 +432,10 @@ def create_preprocessing_diagram(df, target_name, processed_feature_count):
         {
             "label": "Final Model Matrix",
             "status": "active",
-            "detail": f"Final feature matrix contains {processed_feature_count:,} model-ready columns.",
+            "detail": (
+                f"Original features: {preprocessing_info['original_feature_count']:,}. "
+                f"Final encoded features: {preprocessing_info['final_feature_count']:,}."
+            ),
         },
     ]
 
@@ -304,6 +445,25 @@ def create_preprocessing_diagram(df, target_name, processed_feature_count):
     }
     x_values = list(range(len(steps)))
     y_values = [0] * len(steps)
+
+    def wrap_step_label(label, max_chars=16):
+        words = label.split()
+        lines = []
+        current_line = []
+
+        for word in words:
+            candidate = " ".join(current_line + [word])
+            if len(candidate) <= max_chars:
+                current_line.append(word)
+            else:
+                if current_line:
+                    lines.append(" ".join(current_line))
+                current_line = [word]
+
+        if current_line:
+            lines.append(" ".join(current_line))
+
+        return "<br>".join(lines)
 
     fig = go.Figure()
     for index in range(len(steps) - 1):
@@ -343,31 +503,42 @@ def create_preprocessing_diagram(df, target_name, processed_feature_count):
     for index, step in enumerate(steps):
         fig.add_annotation(
             x=x_values[index],
-            y=-0.28,
-            text=step["label"],
+            y=-0.32,
+            text=wrap_step_label(step["label"]),
             showarrow=False,
             font=dict(size=12, color="#e5e7eb"),
             align="center",
-            width=120,
+            width=125,
         )
 
     fig.update_layout(
         title=dict(text="Preprocessing Pipeline", x=0.5),
-        height=330,
-        margin=dict(l=30, r=30, t=70, b=95),
+        height=360,
+        margin=dict(l=30, r=30, t=70, b=120),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         hovermode="closest",
         xaxis=dict(visible=False, range=[-0.45, len(steps) - 0.55]),
-        yaxis=dict(visible=False, range=[-0.55, 0.45]),
+        yaxis=dict(visible=False, range=[-0.7, 0.45]),
     )
     return fig
 
 
-def build_prediction_input(df, target_name):
-    feature_columns = [column for column in df.columns if column != target_name]
+def build_prediction_input(df, target_name, preprocessing_info):
+    feature_columns = [
+        column
+        for column in df.columns
+        if column != target_name
+        and column not in preprocessing_info["dropped_high_cardinality_cols"]
+    ]
     st.sidebar.header("Prediction Input")
     input_data = {}
+
+    if preprocessing_info["dropped_high_cardinality_cols"]:
+        st.sidebar.caption(
+            "Skipped high-cardinality fields: "
+            + ", ".join(preprocessing_info["dropped_high_cardinality_cols"])
+        )
 
     for column in feature_columns:
         series = df[column].dropna()
@@ -405,11 +576,30 @@ def build_prediction_input(df, target_name):
     return input_data
 
 
-def preprocess_prediction_input(input_data, model_columns):
+def preprocess_prediction_input(input_data, preprocessing_info):
     new_df = pd.DataFrame([input_data])
-    new_df = pd.get_dummies(new_df, drop_first=False)
-    new_df = new_df.reindex(columns=model_columns, fill_value=0)
-    new_df = new_df.apply(pd.to_numeric, errors="coerce")
+
+    for column in preprocessing_info["categorical_cols"]:
+        if column not in new_df.columns:
+            continue
+
+        encoder = preprocessing_info["label_encoders"][column]
+        value = str(new_df.at[0, column])
+        if value not in encoder.classes_:
+            raise ValueError(f"Unknown category for {column}: {value}")
+        new_df[column] = encoder.transform([value])
+
+    for column in preprocessing_info["numeric_cols"]:
+        if column not in new_df.columns:
+            continue
+        new_df[column] = pd.to_numeric(new_df[column], errors="coerce")
+
+    if preprocessing_info["numeric_cols"] and preprocessing_info["scaler"] is not None:
+        new_df[preprocessing_info["numeric_cols"]] = preprocessing_info["scaler"].transform(
+            new_df[preprocessing_info["numeric_cols"]]
+        )
+
+    new_df = new_df.reindex(columns=preprocessing_info["retained_feature_columns"])
 
     if new_df.isna().any(axis=None):
         raise ValueError("Prediction input contains values that could not be converted.")
@@ -421,8 +611,9 @@ STEP_DESCRIPTIONS = {
     "Input Data Loading": "Loads the raw dataset from either the built-in dataset picker or the uploaded file.",
     "Target Column Separation": "Splits the selected target variable away from the feature columns used for training.",
     "Missing Value Handling": "Removes rows that contain missing or non-convertible values after preprocessing.",
-    "Categorical Encoding": "Converts text or categorical feature values into numeric one-hot indicator columns.",
-    "Numerical Conversion": "Keeps numeric feature columns model-ready and coerces numeric-like values to numbers.",
+    "High-Cardinality Filter": "Drops categorical fields with too many unique values before encoding.",
+    "Categorical Encoding": "Converts remaining text or categorical feature values into numeric label codes.",
+    "Numerical Scaling": "Standardizes numeric features so they have comparable scale.",
     "Final Model Matrix": "Builds the final numeric feature matrix that Gaussian Naive Bayes receives.",
 }
 
@@ -430,8 +621,9 @@ STEP_JUSTIFICATIONS = {
     "Input Data Loading": "The model needs a structured table before any learning or evaluation can happen.",
     "Target Column Separation": "Features describe each row, while the target is the class the model learns to predict.",
     "Missing Value Handling": "Gaussian Naive Bayes cannot train on NaN values, so unusable rows must be removed.",
+    "High-Cardinality Filter": "Dropping identifier-like categorical fields prevents inflated feature counts and noisy encodings.",
     "Categorical Encoding": "Scikit-learn estimators require numeric inputs, so text categories need numeric representation.",
-    "Numerical Conversion": "The model estimates numeric Gaussian distributions for each feature and class.",
+    "Numerical Scaling": "Scaling prevents large numeric ranges from dominating the model diagnostics and comparisons.",
     "Final Model Matrix": "This confirms the exact shape and columns that are passed into training and prediction.",
 }
 
@@ -444,20 +636,38 @@ def build_raw_feature_frame(df, target_name):
     return df.drop(columns=[target_name])
 
 
-def build_encoded_feature_frame(df, target_name):
+def build_filtered_feature_frame(df, target_name, preprocessing_info):
     raw_features = build_raw_feature_frame(df, target_name)
-    return pd.get_dummies(raw_features, drop_first=False)
+    return raw_features.drop(columns=preprocessing_info["dropped_high_cardinality_cols"])
 
 
-def build_numeric_feature_frame(df, target_name):
-    encoded_features = build_encoded_feature_frame(df, target_name)
-    return encoded_features.apply(pd.to_numeric, errors="coerce")
+def build_encoded_feature_frame(df, target_name, preprocessing_info):
+    encoded_features = build_filtered_feature_frame(df, target_name, preprocessing_info).dropna().copy()
+
+    for column in preprocessing_info["categorical_cols"]:
+        if column in encoded_features.columns:
+            encoder = preprocessing_info["label_encoders"][column]
+            encoded_features[column] = encoder.transform(encoded_features[column].astype(str))
+
+    return encoded_features
 
 
-def get_step_frames(step, df, target_name, X, y):
+def build_scaled_feature_frame(df, target_name, preprocessing_info):
+    scaled_features = build_encoded_feature_frame(df, target_name, preprocessing_info)
+
+    if preprocessing_info["numeric_cols"] and preprocessing_info["scaler"] is not None:
+        scaled_features[preprocessing_info["numeric_cols"]] = preprocessing_info["scaler"].transform(
+            scaled_features[preprocessing_info["numeric_cols"]]
+        )
+
+    return scaled_features.apply(pd.to_numeric, errors="coerce")
+
+
+def get_step_frames(step, df, target_name, X, y, preprocessing_info):
     raw_features = build_raw_feature_frame(df, target_name)
-    encoded_features = build_encoded_feature_frame(df, target_name)
-    numeric_features = build_numeric_feature_frame(df, target_name)
+    filtered_features = build_filtered_feature_frame(df, target_name, preprocessing_info)
+    encoded_features = build_encoded_feature_frame(df, target_name, preprocessing_info)
+    scaled_features = build_scaled_feature_frame(df, target_name, preprocessing_info)
     model_ready = pd.concat([X, y.rename(target_name)], axis=1)
 
     if step == "Input Data Loading":
@@ -466,16 +676,18 @@ def get_step_frames(step, df, target_name, X, y):
         return df, raw_features
     if step == "Missing Value Handling":
         return df, df.dropna()
+    if step == "High-Cardinality Filter":
+        return raw_features, filtered_features
     if step == "Categorical Encoding":
-        return raw_features, encoded_features
-    if step == "Numerical Conversion":
-        return encoded_features, numeric_features
+        return filtered_features, encoded_features
+    if step == "Numerical Scaling":
+        return encoded_features, scaled_features
     if step == "Final Model Matrix":
         return df, model_ready
     return df, df
 
 
-def create_step_impact_chart(step, df, target_name, before_df, after_df):
+def create_step_impact_chart(step, df, target_name, before_df, after_df, preprocessing_info):
     feature_df = build_raw_feature_frame(df, target_name)
 
     if step == "Input Data Loading":
@@ -506,27 +718,45 @@ def create_step_impact_chart(step, df, target_name, before_df, after_df):
         missing_df.columns = ["Column", "Missing Values"]
         return px.bar(missing_df, x="Column", y="Missing Values", title="Missing Values by Column")
 
+    if step == "High-Cardinality Filter":
+        dropped_columns = preprocessing_info["dropped_high_cardinality_cols"]
+        if not dropped_columns:
+            cardinality_df = pd.DataFrame({"Column": ["No columns dropped"], "Unique Values": [0]})
+        else:
+            cardinality_df = pd.DataFrame(
+                {
+                    "Column": dropped_columns,
+                    "Unique Values": [feature_df[column].nunique(dropna=True) for column in dropped_columns],
+                }
+            )
+        return px.bar(
+            cardinality_df,
+            x="Column",
+            y="Unique Values",
+            title="Dropped High-Cardinality Columns",
+        )
+
     if step == "Categorical Encoding":
-        categorical_columns = feature_df.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
+        categorical_columns = preprocessing_info["categorical_cols"]
         if not categorical_columns:
             encoded_counts = pd.DataFrame({"Column": ["No categorical columns"], "Encoded Columns": [0]})
         else:
             encoded_counts = pd.DataFrame(
                 {
                     "Column": categorical_columns,
-                    "Encoded Columns": [
+                    "Label Count": [
                         feature_df[column].dropna().astype(str).nunique()
                         for column in categorical_columns
                     ],
                 }
             )
-        return px.bar(encoded_counts, x="Column", y="Encoded Columns", title="One-Hot Encoded Columns")
+        return px.bar(encoded_counts, x="Column", y=encoded_counts.columns[-1], title="Label Encoded Columns")
 
-    if step == "Numerical Conversion":
-        numeric_columns = feature_df.select_dtypes(include=[np.number]).columns.tolist()
+    if step == "Numerical Scaling":
+        numeric_columns = preprocessing_info["numeric_cols"]
         if numeric_columns:
-            melted = feature_df[numeric_columns[:6]].melt(var_name="Feature", value_name="Value")
-            return px.box(melted, x="Feature", y="Value", title="Numeric Feature Distributions")
+            melted = after_df[numeric_columns[:6]].melt(var_name="Feature", value_name="Scaled Value")
+            return px.box(melted, x="Feature", y="Scaled Value", title="Scaled Numeric Feature Distributions")
         return px.bar(
             pd.DataFrame({"Measure": ["Numeric Columns"], "Count": [0]}),
             x="Measure",
@@ -546,8 +776,8 @@ def create_step_impact_chart(step, df, target_name, before_df, after_df):
     return None
 
 
-def show_step_details(step, df, target_name, X, y):
-    before_df, after_df = get_step_frames(step, df, target_name, X, y)
+def show_step_details(step, df, target_name, X, y, preprocessing_info):
+    before_df, after_df = get_step_frames(step, df, target_name, X, y, preprocessing_info)
 
     st.subheader(f"Step Details: {step}")
     st.write(f"**What this does:** {STEP_DESCRIPTIONS[step]}")
@@ -561,7 +791,7 @@ def show_step_details(step, df, target_name, X, y):
         st.caption("After")
         st.dataframe(after_df.head(5), width="stretch")
 
-    fig = create_step_impact_chart(step, df, target_name, before_df, after_df)
+    fig = create_step_impact_chart(step, df, target_name, before_df, after_df, preprocessing_info)
     if fig is not None:
         st.plotly_chart(fig, width="stretch")
 
@@ -571,35 +801,40 @@ st.write("Explore the performance of Naive Bayes with interactive visualizations
 
 st.sidebar.header("Settings")
 
-sidebar_section("Variance Smoothing")
-var_smoothing = st.sidebar.slider(
-    "Variance Smoothing",
-    min_value=0.0,
-    max_value=1.0,
-    value=0.5,
+sidebar_section("Data Source")
+data_source_choice = st.sidebar.radio(
+    "Data Source",
+    ("Use Built-in Dataset", "Upload Custom Dataset"),
     label_visibility="collapsed",
 )
 sidebar_divider()
 
-sidebar_section("Select Dataset")
-dataset = st.sidebar.selectbox(
-    "Select Dataset",
-    ["Iris", "Breast Cancer Wisconsin", "Wine"],
-    label_visibility="collapsed",
-)
-sidebar_divider()
-
-sidebar_section("Upload Dataset")
-uploaded_file = st.sidebar.file_uploader(
-    "Upload Dataset",
-    type=["csv", "txt"],
-    label_visibility="collapsed",
-)
-sidebar_divider()
+dataset = None
+uploaded_file = None
+if data_source_choice == "Use Built-in Dataset":
+    sidebar_section("Select Dataset")
+    dataset = st.sidebar.selectbox(
+        "Select Dataset",
+        ["Iris", "Breast Cancer Wisconsin", "Wine"],
+        label_visibility="collapsed",
+    )
+    sidebar_divider()
+else:
+    sidebar_section("Upload Dataset")
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload Dataset",
+        type=["csv", "txt"],
+        label_visibility="collapsed",
+    )
+    sidebar_divider()
 
 try:
     selected_target_col = None
-    if uploaded_file is not None:
+    if data_source_choice == "Upload Custom Dataset":
+        if uploaded_file is None:
+            st.info("Upload a CSV or TXT dataset to begin.")
+            st.stop()
+
         df, data_source = load_uploaded_dataset(uploaded_file)
         st.success("Dataset loaded successfully!")
         column_names = df.columns.tolist()
@@ -623,9 +858,10 @@ try:
             st.stop()
     else:
         df, data_source = load_selected_dataset(dataset)
+        st.success(f"Using the {dataset} dataset.")
 
-    X, y, target_name = prepare_features(df, selected_target_col)
-    recommended_model_name, model_justification = recommend_nb_classifier(X)
+    X, y, target_name, preprocessing_info = preprocess_data(df, selected_target_col)
+    recommended_model_name, model_justification = recommend_nb_classifier(X, preprocessing_info)
 
     sidebar_section("Model Recommendation")
     model_type = st.sidebar.selectbox(
@@ -636,12 +872,17 @@ try:
     sidebar_divider()
 
     selected_model_name = recommended_model_name if model_type == "Auto" else model_type
-    model, X_test, y_test, y_pred, accuracy, accuracy_label = train_and_evaluate(
-        X,
-        y,
-        selected_model_name,
-        var_smoothing,
-    )
+    model_params = build_model_parameter_controls(selected_model_name)
+    try:
+        model, X_test, y_test, y_pred, accuracy, accuracy_label = train_and_evaluate(
+            X,
+            y,
+            selected_model_name,
+            model_params,
+        )
+    except ValueError as e:
+        st.error(f"Selected model is incompatible with the current features: {e}")
+        st.stop()
 
     st.success("Model trained successfully!")
     st.write(f"Data source: {data_source}")
@@ -653,13 +894,23 @@ try:
     else:
         st.success(f"Model override selected: {selected_model_name}")
 
+    sidebar_section("Data Metrics")
+    st.sidebar.write(f"**Original Features:** {preprocessing_info['original_feature_count']}")
+    st.sidebar.write(f"**Final Encoded Features:** {preprocessing_info['final_feature_count']}")
+    if preprocessing_info["dropped_high_cardinality_cols"]:
+        st.sidebar.caption(
+            "Dropped high-cardinality fields: "
+            + ", ".join(preprocessing_info["dropped_high_cardinality_cols"])
+        )
+    sidebar_divider()
+
     metric_1, metric_2, metric_3 = st.columns(3)
     metric_1.metric(accuracy_label, f"{accuracy:.2%}")
     metric_2.metric("Rows Used", f"{len(X):,}")
-    metric_3.metric("Features", f"{len(X.columns):,}")
+    metric_3.metric("Final Encoded Features", f"{len(X.columns):,}")
 
     st.plotly_chart(
-        create_preprocessing_diagram(df, target_name, len(X.columns)),
+        create_preprocessing_diagram(df, target_name, preprocessing_info),
         width="stretch",
     )
 
@@ -672,10 +923,10 @@ try:
     sidebar_divider()
 
     with st.expander("Detailed Step View", expanded=True):
-        show_step_details(selected_step, df, target_name, X, y)
+        show_step_details(selected_step, df, target_name, X, y, preprocessing_info)
 
     st.plotly_chart(
-        build_gaussian_plot(X, y, target_name, var_smoothing),
+        build_gaussian_plot(X, y, target_name, model_params.get("var_smoothing", 1e-9)),
         width="stretch",
     )
     st.plotly_chart(build_confusion_matrix_plot(y_test, y_pred), width="stretch")
@@ -683,11 +934,11 @@ try:
     st.subheader("Data Preview")
     st.dataframe(df.head(10), width="stretch")
 
-    input_data = build_prediction_input(df, target_name)
+    input_data = build_prediction_input(df, target_name, preprocessing_info)
 
     if st.sidebar.button("Predict"):
         try:
-            new_data_df = preprocess_prediction_input(input_data, X.columns)
+            new_data_df = preprocess_prediction_input(input_data, preprocessing_info)
             prediction = model.predict(new_data_df)[0]
             st.success(f"Prediction: {prediction}")
         except Exception as e:
