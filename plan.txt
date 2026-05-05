@@ -1,0 +1,22 @@
+Great choices! Streamlit + Naive Bayes is a strong combination for a web app. Let me plan this out in detail before we build anything.Click any pipeline step or algorithm card for a deep dive. Here's what you have planned:
+
+**Technology stack:**
+- `streamlit` — UI framework
+- `scikit-learn` — GaussianNB model + metrics
+- `plotly` — interactive charts (sliders animate the graphs live)
+- `matplotlib` / `seaborn` — decision boundary, Gaussian plots
+- `pandas` / `numpy` — data handling
+
+**The key differentiator for your grade** is the Gaussian distribution plot — it literally shows *why* Naive Bayes works by plotting P(x | class) for each feature. Most student projects skip this. It directly visualises the probabilistic assumption, and changes live as you move the `var_smoothing` slider.
+
+**Recommended datasets to bundle:**
+- Iris (3-class, continuous) — best for decision boundary
+- Breast Cancer Wisconsin (binary, medical context)
+- Wine (3-class, higher-dimensional)
+- CSV upload for custom data
+
+**Ready to start building?** Tell me which part to tackle first:
+
+1. The full Streamlit app code (complete, runnable)
+2. Just the sidebar + parameter wiring first
+3. Just the visualizations module first
