@@ -31,6 +31,42 @@ st.markdown(
         border-bottom: 1px solid rgba(245, 245, 245, 0.16);
         margin: 1rem 0 0.2rem;
     }
+
+    .start-card {
+        background: linear-gradient(135deg, rgba(14, 165, 233, 0.14), rgba(34, 197, 94, 0.10));
+        border: 1px solid rgba(148, 163, 184, 0.28);
+        border-radius: 10px;
+        padding: 1.25rem 1.5rem;
+        margin: 0.75rem 0 1.25rem;
+        text-align: center;
+    }
+
+    .start-card h2 {
+        margin: 0 0 0.45rem;
+        font-size: 1.45rem;
+    }
+
+    .start-card p {
+        margin: 0;
+        color: rgba(229, 231, 235, 0.86);
+    }
+
+    .hyperparameter-card {
+        background: rgba(15, 23, 42, 0.48);
+        border: 1px solid rgba(14, 165, 233, 0.28);
+        border-radius: 10px;
+        padding: 1rem 1.25rem;
+        margin: 0.5rem 0 1rem;
+    }
+
+    .hyperparameter-card h3 {
+        margin: 0 0 0.4rem;
+    }
+
+    .hyperparameter-card p {
+        margin: 0;
+        color: rgba(229, 231, 235, 0.86);
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -225,12 +261,27 @@ def validate_model_choice(X, model_name):
         raise ValueError("MultinomialNB requires non-negative feature values.")
 
 
-def build_model_parameter_controls(model_name):
-    sidebar_section("Model Parameters")
+def build_model_parameter_controls(model_name, container=st.sidebar, show_sidebar_divider=True):
     model_params = {}
 
+    container.markdown(
+        """
+        <div class="hyperparameter-card">
+            <h3>Hyperparameter Tuning</h3>
+            <p>
+                Hyperparameters are the steering wheel of your model. Tweak these
+                values to change how the algorithm learns; the metrics and charts
+                update on the next Streamlit rerun.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     if model_name == "GaussianNB":
-        smoothing_power = st.sidebar.slider(
+        container.write("### Variance Smoothing")
+        container.caption("Widens the Gaussian curve slightly so unseen or rare values are less brittle.")
+        smoothing_power = container.slider(
             "Variance Smoothing (log10)",
             min_value=-11,
             max_value=-1,
@@ -239,34 +290,44 @@ def build_model_parameter_controls(model_name):
             help="GaussianNB var_smoothing value is 10 raised to this exponent.",
         )
         model_params["var_smoothing"] = 10.0 ** smoothing_power
-        st.sidebar.caption(f"var_smoothing = {model_params['var_smoothing']:.0e}")
+        container.caption(f"Current var_smoothing = {model_params['var_smoothing']:.0e}")
     elif model_name == "MultinomialNB":
-        model_params["alpha"] = st.sidebar.slider(
+        container.write("### Alpha")
+        container.caption("Prevents zero-probability errors when a feature/class combination is rare.")
+        model_params["alpha"] = container.slider(
             "Alpha (Additive Smoothing)",
             min_value=0.0,
             max_value=2.0,
             value=1.0,
             step=0.1,
         )
-        model_params["fit_prior"] = st.sidebar.checkbox(
+        container.write("### Fit Prior")
+        container.caption("Learns how common each class is before looking at the feature values.")
+        model_params["fit_prior"] = container.checkbox(
             "Fit Prior",
             value=True,
             help="Whether to learn class prior probabilities.",
         )
     elif model_name == "BernoulliNB":
-        model_params["alpha"] = st.sidebar.slider(
+        container.write("### Alpha")
+        container.caption("Prevents zero-probability errors when a binary feature/class combination is rare.")
+        model_params["alpha"] = container.slider(
             "Alpha (Additive Smoothing)",
             min_value=0.0,
             max_value=2.0,
             value=1.0,
             step=0.1,
         )
-        model_params["fit_prior"] = st.sidebar.checkbox(
+        container.write("### Fit Prior")
+        container.caption("Learns how common each class is before looking at the feature values.")
+        model_params["fit_prior"] = container.checkbox(
             "Fit Prior",
             value=True,
             help="Whether to learn class prior probabilities.",
         )
-        model_params["binarize"] = st.sidebar.number_input(
+        container.write("### Binarize")
+        container.caption("Turns values above this threshold into 1 and values at/below it into 0.")
+        model_params["binarize"] = container.number_input(
             "Binarize",
             min_value=0.0,
             max_value=2.0,
@@ -277,7 +338,8 @@ def build_model_parameter_controls(model_name):
     else:
         raise ValueError(f"Unsupported model type: {model_name}")
 
-    sidebar_divider()
+    if show_sidebar_divider:
+        sidebar_divider()
     return model_params
 
 
@@ -524,18 +586,18 @@ def create_preprocessing_diagram(df, target_name, preprocessing_info):
     return fig
 
 
-def build_prediction_input(df, target_name, preprocessing_info):
+def build_prediction_input(df, target_name, preprocessing_info, container=st.sidebar):
     feature_columns = [
         column
         for column in df.columns
         if column != target_name
         and column not in preprocessing_info["dropped_high_cardinality_cols"]
     ]
-    st.sidebar.header("Prediction Input")
+    container.header("Prediction Input")
     input_data = {}
 
     if preprocessing_info["dropped_high_cardinality_cols"]:
-        st.sidebar.caption(
+        container.caption(
             "Skipped high-cardinality fields: "
             + ", ".join(preprocessing_info["dropped_high_cardinality_cols"])
         )
@@ -543,7 +605,7 @@ def build_prediction_input(df, target_name, preprocessing_info):
     for column in feature_columns:
         series = df[column].dropna()
         if series.empty:
-            input_data[column] = st.sidebar.text_input(
+            input_data[column] = container.text_input(
                 f"Enter {column}:",
                 value="",
                 key=f"predict_{column}",
@@ -552,7 +614,7 @@ def build_prediction_input(df, target_name, preprocessing_info):
             min_value = float(series.min())
             max_value = float(series.max())
             mean_value = float(series.mean())
-            input_data[column] = st.sidebar.number_input(
+            input_data[column] = container.number_input(
                 f"Enter {column}:",
                 min_value=min_value,
                 max_value=max_value,
@@ -561,13 +623,13 @@ def build_prediction_input(df, target_name, preprocessing_info):
                 key=f"predict_{column}",
             )
         elif pd.api.types.is_bool_dtype(series):
-            input_data[column] = st.sidebar.selectbox(
+            input_data[column] = container.selectbox(
                 f"Enter {column}:",
                 options=sorted(series.unique().tolist()),
                 key=f"predict_{column}",
             )
         else:
-            input_data[column] = st.sidebar.selectbox(
+            input_data[column] = container.selectbox(
                 f"Enter {column}:",
                 options=sorted(series.astype(str).unique().tolist()),
                 key=f"predict_{column}",
@@ -798,6 +860,19 @@ def show_step_details(step, df, target_name, X, y, preprocessing_info):
 
 st.title("Naive Bayes Visualization App")
 st.write("Explore the performance of Naive Bayes with interactive visualizations.")
+st.markdown(
+    """
+    <div class="start-card">
+        <h2>Welcome!</h2>
+        <p>
+            Follow the tabs below to see how your data moves from raw rows,
+            through preprocessing, into a Naive Bayes model, and finally into
+            an interactive prediction playground.
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 st.sidebar.header("Settings")
 
@@ -872,7 +947,23 @@ try:
     sidebar_divider()
 
     selected_model_name = recommended_model_name if model_type == "Auto" else model_type
-    model_params = build_model_parameter_controls(selected_model_name)
+    tab_data, tab_model, tab_predict = st.tabs(
+        ["Data & Preprocessing", "Model Insights", "Playground / Predict"]
+    )
+
+    with tab_data:
+        st.header("1. Choose Data Source")
+        st.write(f"Active source: **{data_source_choice}**")
+        st.write(f"Data source: **{data_source}**")
+        st.write(f"Target column: **{target_name}**")
+
+        st.header("Hyperparameter Tuning")
+        model_params = build_model_parameter_controls(
+            selected_model_name,
+            container=st,
+            show_sidebar_divider=False,
+        )
+
     try:
         model, X_test, y_test, y_pred, accuracy, accuracy_label = train_and_evaluate(
             X,
@@ -885,14 +976,6 @@ try:
         st.stop()
 
     st.success("Model trained successfully!")
-    st.write(f"Data source: {data_source}")
-    st.write(f"Target column: {target_name}")
-    st.write(f"**Recommended Model:** {recommended_model_name}")
-    st.write(model_justification)
-    if model_type == "Auto":
-        st.info(f"Using Auto selection: {selected_model_name}")
-    else:
-        st.success(f"Model override selected: {selected_model_name}")
 
     sidebar_section("Data Metrics")
     st.sidebar.write(f"**Original Features:** {preprocessing_info['original_feature_count']}")
@@ -904,16 +987,6 @@ try:
         )
     sidebar_divider()
 
-    metric_1, metric_2, metric_3 = st.columns(3)
-    metric_1.metric(accuracy_label, f"{accuracy:.2%}")
-    metric_2.metric("Rows Used", f"{len(X):,}")
-    metric_3.metric("Final Encoded Features", f"{len(X.columns):,}")
-
-    st.plotly_chart(
-        create_preprocessing_diagram(df, target_name, preprocessing_info),
-        width="stretch",
-    )
-
     sidebar_section("Pipeline Step Details")
     selected_step = st.sidebar.selectbox(
         "Pipeline Step Details",
@@ -922,26 +995,80 @@ try:
     )
     sidebar_divider()
 
-    with st.expander("Detailed Step View", expanded=True):
-        show_step_details(selected_step, df, target_name, X, y, preprocessing_info)
+    with tab_data:
+        metric_1, metric_2, metric_3 = st.columns(3)
+        metric_1.metric("Original Features", f"{preprocessing_info['original_feature_count']:,}")
+        metric_2.metric("Rows Used", f"{len(X):,}")
+        metric_3.metric("Final Encoded Features", f"{len(X.columns):,}")
 
-    st.plotly_chart(
-        build_gaussian_plot(X, y, target_name, model_params.get("var_smoothing", 1e-9)),
-        width="stretch",
-    )
-    st.plotly_chart(build_confusion_matrix_plot(y_test, y_pred), width="stretch")
+        st.header("2. Pipeline Steps")
+        st.plotly_chart(
+            create_preprocessing_diagram(df, target_name, preprocessing_info),
+            width="stretch",
+        )
 
-    st.subheader("Data Preview")
-    st.dataframe(df.head(10), width="stretch")
+        with st.expander("Detailed Step View", expanded=True):
+            show_step_details(selected_step, df, target_name, X, y, preprocessing_info)
 
-    input_data = build_prediction_input(df, target_name, preprocessing_info)
+        with st.expander("How to read this tab"):
+            st.write(
+                "Start with the pipeline chart, then use the sidebar's Pipeline Step Details "
+                "selector to inspect the before/after tables for each preprocessing step."
+            )
 
-    if st.sidebar.button("Predict"):
-        try:
-            new_data_df = preprocess_prediction_input(input_data, preprocessing_info)
-            prediction = model.predict(new_data_df)[0]
-            st.success(f"Prediction: {prediction}")
-        except Exception as e:
-            st.error(f"Error during prediction: {e}")
+        st.subheader("Data Preview")
+        st.dataframe(df.head(10), width="stretch")
+
+    with tab_model:
+        st.header("3. Model Insights")
+
+        metric_1, metric_2, metric_3 = st.columns(3)
+        metric_1.metric(accuracy_label, f"{accuracy:.2%}")
+        metric_2.metric("Selected Model", selected_model_name)
+        metric_3.metric("Target Classes", f"{y.nunique():,}")
+
+        st.write(f"**Recommended Model:** {recommended_model_name}")
+        st.write(model_justification)
+        if model_type == "Auto":
+            st.info(f"Using Auto selection: {selected_model_name}")
+        else:
+            st.success(f"Model override selected: {selected_model_name}")
+
+        st.plotly_chart(
+            build_gaussian_plot(X, y, target_name, model_params.get("var_smoothing", 1e-9)),
+            width="stretch",
+        )
+        with st.expander("Explanation of Gaussian Distribution Plot"):
+            st.write(
+                "This chart shows how the first model-ready feature is distributed for each target class. "
+                "More separated curves usually mean that feature is more useful for classification."
+            )
+
+        st.plotly_chart(build_confusion_matrix_plot(y_test, y_pred), width="stretch")
+        with st.expander("Explanation of Confusion Matrix"):
+            st.write(
+                "A confusion matrix compares actual classes with predicted classes. "
+                "Values on the diagonal are correct predictions; off-diagonal values are mistakes."
+            )
+
+    with tab_predict:
+        st.header("4. Playground / Predict")
+        st.write("Enter values for one new row and ask the trained model for a prediction.")
+
+        input_data = build_prediction_input(df, target_name, preprocessing_info, container=st)
+
+        if st.button("Predict"):
+            try:
+                new_data_df = preprocess_prediction_input(input_data, preprocessing_info)
+                prediction = model.predict(new_data_df)[0]
+                st.success(f"Prediction: {prediction}")
+            except Exception as e:
+                st.error(f"Error during prediction: {e}")
+
+        with st.expander("How to use the playground"):
+            st.write(
+                "The fields match the features retained after preprocessing. "
+                "High-cardinality fields dropped by the pipeline are intentionally skipped."
+            )
 except Exception as e:
     st.warning(f"Error loading or processing the dataset: {e}")
