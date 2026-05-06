@@ -1,10 +1,10 @@
 # Naive Bayes Visualization App 📊
+https://vizmachinelearning.streamlit.app/
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![Streamlit](https://img.shields.io/streamlit-badge.svg?logo=streamlit)](https://streamlit.io/)
 [![License](https://img.shields.io/github/license/your-username/your-repository?logo=mit)](https://github.com/your-username/your-repository/blob/main/LICENSE)
 
-![App Demo](https://vizmachinelearning.streamlit.app/)  <!-- Replace with actual gif link -->
 
 ## About The Project
 
